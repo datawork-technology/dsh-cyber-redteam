@@ -28,7 +28,7 @@
         "zh": "Cyber 红队"
       },
       "description": {
-        "en": "CyberOps red-team runtime: masked /cyber and authorized /cyber-2 routes whose tokens are unique per chat and re-minted on every activation, plus a composer Red Team toggle. Masking only happens while the chat is armed. Bring your own verified toolkit.",
+        "en": "CyberOps red-team runtime: masked /cyber and authorized /cyber-2 routes that each get their own loopback listener and port, plus a composer Red Team toggle. Masking only happens while the chat is armed. Bring your own verified toolkit.",
         "zh": "CyberOps 红队运行时：掩码 /cyber 与授权的 /cyber-2 路由，令牌按会话唯一、每次激活重新生成，另有输入框 Red Team 开关。工具包需自备。"
       },
       "author": "Datawork Technology",
@@ -50,12 +50,12 @@
       },
       "versions": [
         {
-          "version": "0.5.2",
-          "publishTimestamp": 1794306105,
+          "version": "0.6.0",
+          "publishTimestamp": 1794306405,
           "source": {
             "type": "git",
             "url": "https://github.com/datawork-technology/dsh-cyber-redteam",
-            "commit": "5ea14be01e1f399b37764db7ff9ea2d2b0773a07"
+            "commit": "b1ee471a7ed73a17f3c8bc3730916c8435ea5ef9"
           },
           "engines": {}
         }

@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Datawork Technology DSH plugins",
+    "zh": "Datawork Technology 的 DSH 插件"
+  },
+  "description": {
+    "en": "DeepSeek Harness plugins by Datawork Technology. Add this file as an index source under Plugins → Discover.",
+    "zh": "Datawork Technology 开发的 DeepSeek Harness 插件。把本文件加成 Plugins → Discover 里的索引源即可浏览。"
+  },
+  "metadata": {
+    "categories": {
+      "security": {
+        "title": {
+          "en": "Security",
+          "zh": "安全"
+        }
+      }
+    },
+    "labels": {},
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "dsh-cyber-redteam",
+      "title": {
+        "en": "Cyber Red Team",
+        "zh": "Cyber 红队"
+      },
+      "description": {
+        "en": "CyberOps red-team runtime: masked /cyber and authorized /cyber-2 routes whose tokens are unique per chat and re-minted on every activation, plus a composer Red Team toggle. Bring your own verified toolkit.",
+        "zh": "CyberOps 红队运行时：掩码 /cyber 与授权的 /cyber-2 路由，令牌按会话唯一、每次激活重新生成，另有输入框 Red Team 开关。工具包需自备。"
+      },
+      "author": "Datawork Technology",
+      "homepage": "https://github.com/datawork-technology/dsh-cyber-redteam#readme",
+      "repository": {
+        "url": "https://github.com/datawork-technology/dsh-cyber-redteam"
+      },
+      "metadata": {
+        "category": "security",
+        "keywords": [
+          "security-testing",
+          "red-team",
+          "penetration-testing",
+          "url-masking",
+          "cyberops"
+        ],
+        "labels": [],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.5.1",
+          "publishTimestamp": 1794288492,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/datawork-technology/dsh-cyber-redteam",
+            "commit": "226f8860df8def26de125450b912b7650ac243e1"
+          },
+          "engines": {}
+        }
+      ]
+    }
+  ]
+}

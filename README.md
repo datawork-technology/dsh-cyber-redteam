@@ -25,13 +25,28 @@ allowlist.
 Masking is armed-state driven: a chat that never turned Red Team on keeps every
 URL exactly as typed, and nothing is registered for it.
 
+Each masked route also owns its own HTTP listener on its own loopback port, so
+two masked URLs never share an origin. The masked base therefore differs per
+chat *and* per route:
+
+```
+http://127.0.0.1:52104/_cyberops/<token>/...   chat A -> example.com
+http://127.0.0.1:52105/_cyberops/<token>/...   chat B -> example.com
+http://127.0.0.1:52106/_cyberops/<token>/...   chat A -> api.example.net
+```
+
 Every masked route token is minted with a fresh 128-bit nonce mixed into an
 HMAC keyed by the install secret and bound to the owning session and origin:
 
-- **One token per chat.** Two conversations that target the same origin get
-  different masked URLs, so a URL shown in one chat is useless in another.
-  Tokens are checked against the whole route table, not only the owning
-  session's, because `/_cyberops/<token>/` resolves globally.
+- **One token and one port per chat.** Two conversations that target the same
+  origin get different masked URLs *and* different ports, so a URL shown in one
+  chat is useless in another.
+- **One port per route.** A route's listener only serves that route; a token
+  from another route answers 404 on it. Retiring a route closes its listener,
+  so a revoked masked URL stops answering at all.
+- **Ports survive a restart.** Each route's port is persisted; if another
+  process took it, that route falls back to an ephemeral port and persists the
+  replacement.
 - **One token per activation.** `/cyberoff` (and disarming, hiding, or clearing
   a session) deletes the route. Authorizing the same target again mints a new
   token; a previously leaked URL never starts resolving again.
@@ -87,7 +102,7 @@ harness restart. New sessions start disarmed.
 | Concern | Default | Override |
 | --- | --- | --- |
 | Toolkit root | `$DSH_HOME/toolkits/my-home-server-toolkit`, else `~/.dsh/toolkits/...` | bundle config `toolkitRoot` |
-| Gateway state | `$DSH_HOME/storages/cyberops-gateway.json`, else `~/.dsh/storages/...` | bundle config `statePath` |
+| Gateway state (schema v2: one port per route) | `$DSH_HOME/storages/cyberops-gateway.json`, else `~/.dsh/storages/...` | bundle config `statePath` |
 | Private targets | off | bundle config `allowPrivateTargets` |
 | Toggle arms direct-access | on | bundle config `armDirectAccess: false` |
 

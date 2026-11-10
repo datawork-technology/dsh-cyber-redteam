@@ -86,6 +86,17 @@ function originOf(target) {
   return target.origin
 }
 
+/** The loopback origin of one route's own listener. */
+function aliasOrigin(route) {
+  if (!route.port) throw new Error('CyberOps route has no listener yet')
+  return `http://${LOOPBACK_HOST}:${route.port}`
+}
+
+/** The masked base of one route: its own origin plus its opaque token. */
+function routeBase(route) {
+  return `${aliasOrigin(route)}${ROUTE_PREFIX}${route.token}`
+}
+
 function isBlockedAddress(address) {
   const family = isIP(address)
   if (family === 4) return blockedAddresses.check(address, 'ipv4')
@@ -199,62 +210,93 @@ export class CyberOpsGateway {
     this.secret = options.secret ?? randomBytes(32)
     this.sessions = new Map()
     this.routes = new Map()
-    this.server = undefined
-    this.origin = undefined
-    this.persistedPort = undefined
+    this.started = false
     this.persistChain = Promise.resolve()
     this.persistError = undefined
     this.httpAgent = new http.Agent({ lookup: lookupPublic(this.allowPrivateTargets) })
     this.httpsAgent = new https.Agent({ lookup: lookupPublic(this.allowPrivateTargets) })
   }
 
-  /** Bind one port, resolving on `listening` and rejecting on `error`. */
-  #listen(port) {
+  /** Bind one route listener, resolving with the port it actually got. */
+  #listen(server, port) {
     return new Promise((resolve, reject) => {
       const onError = (error) => {
-        this.server.off('listening', onListening)
+        server.off('listening', onListening)
         reject(error)
       }
       const onListening = () => {
-        this.server.off('error', onError)
-        resolve()
+        server.off('error', onError)
+        resolve(server.address().port)
       }
-      this.server.once('error', onError)
-      this.server.once('listening', onListening)
-      this.server.listen(port, LOOPBACK_HOST)
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(port, LOOPBACK_HOST)
     })
   }
 
-  async start() {
-    if (this.server) return this.origin
-    await this.#loadState()
-    this.server = http.createServer((request, response) => this.#serve(request, response))
+  /**
+   * Every masked route owns its own listener, so no two masked URLs share an
+   * origin: the port is as unique per URL as the path token is. A route keeps
+   * its port across a restart through the persisted state.
+   */
+  async #bindRoute(route, preferredPort) {
+    const server = http.createServer((request, response) => this.#serve(route, request, response))
+    let port
     try {
-      await this.#listen(this.persistedPort ?? 0)
+      port = await this.#listen(server, preferredPort ?? 0)
     } catch (error) {
-      // This gateway starts during harness boot, so a persisted port taken by
-      // another process must not fail the whole boot: fall back to ephemeral.
-      if (error?.code !== 'EADDRINUSE' || this.persistedPort === undefined) throw error
-      this.server.close()
-      this.server = http.createServer((request, response) => this.#serve(request, response))
-      await this.#listen(0)
+      // A persisted port taken by another process must not fail the boot: fall
+      // back to an ephemeral one and persist the replacement.
+      if (error?.code !== 'EADDRINUSE' || preferredPort === undefined) {
+        server.close()
+        throw error
+      }
+      port = await this.#listen(server, 0)
     }
-    const address = this.server.address()
-    this.origin = `http://${LOOPBACK_HOST}:${address.port}`
-    this.persistedPort = address.port
+    route.server = server
+    route.port = port
     this.#queuePersist()
+    return port
+  }
+
+  #retireRoute(route) {
+    const server = route.server
+    route.server = undefined
+    route.port = undefined
+    if (!server) return
+    server.closeAllConnections?.()
+    server.close(() => {})
+  }
+
+  /** Origins of the live masked routes, one per route. */
+  origins() {
+    return [...this.routes.values()].filter((route) => route.port).map((route) => aliasOrigin(route))
+  }
+
+  async start() {
+    if (this.started) return this.origins()
+    await this.#loadState()
+    this.started = true
+    for (const route of [...this.routes.values()]) await this.#bindRoute(route, route.port)
     await this.flush()
-    return this.origin
+    return this.origins()
   }
 
   async close() {
     await this.flush()
     this.httpAgent.destroy()
     this.httpsAgent.destroy()
-    const server = this.server
-    this.server = undefined
-    this.origin = undefined
-    if (server) await new Promise((resolve) => server.close(resolve))
+    const servers = []
+    for (const route of this.routes.values()) {
+      if (route.server) servers.push(route.server)
+      route.server = undefined
+      route.port = undefined
+    }
+    this.started = false
+    await Promise.all(servers.map((server) => new Promise((resolve) => {
+      server.closeAllConnections?.()
+      server.close(() => resolve())
+    })))
   }
 
   async flush() {
@@ -265,7 +307,10 @@ export class CyberOpsGateway {
   dropSession(sessionId) {
     const session = this.sessions.get(String(sessionId))
     if (!session) return
-    for (const route of session.byOrigin.values()) this.routes.delete(route.token)
+    for (const route of session.byOrigin.values()) {
+      this.routes.delete(route.token)
+      this.#retireRoute(route)
+    }
     this.sessions.delete(String(sessionId))
     this.#queuePersist()
   }
@@ -305,8 +350,8 @@ export class CyberOpsGateway {
     return this.sessionState(id)
   }
 
-  register(sessionId, rawTarget, source = 'referenced') {
-    if (!this.origin) throw new Error('CyberOps gateway has not started')
+  async register(sessionId, rawTarget, source = 'referenced') {
+    if (!this.started) throw new Error('CyberOps gateway has not started')
     const id = String(sessionId)
     const target = canonicalTarget(rawTarget, this.allowPrivateTargets)
     const canonicalOrigin = originOf(target)
@@ -324,9 +369,18 @@ export class CyberOpsGateway {
         origin: canonicalOrigin,
         source: source === 'excluded' ? 'referenced' : source,
         attested: source === 'explicit',
+        port: undefined,
+        server: undefined,
       }
       session.byOrigin.set(canonicalOrigin, route)
       this.routes.set(token, route)
+      try {
+        await this.#bindRoute(route)
+      } catch (error) {
+        session.byOrigin.delete(canonicalOrigin)
+        this.routes.delete(token)
+        throw error
+      }
     } else if (source === 'explicit') {
       route.source = 'explicit'
       route.attested = true
@@ -397,10 +451,7 @@ export class CyberOpsGateway {
     }
     if (
       !state ||
-      state.version !== 1 ||
-      !Number.isInteger(state.port) ||
-      state.port < 1 ||
-      state.port > 65535 ||
+      (state.version !== 1 && state.version !== 2) ||
       typeof state.secret !== 'string' ||
       !Array.isArray(state.sessions)
     ) {
@@ -436,12 +487,18 @@ export class CyberOpsGateway {
         if (routes.has(storedRoute.token) || session.byOrigin.has(origin)) {
           throw new Error('CyberOps gateway state contains a duplicate route')
         }
+        const port = storedRoute.port
+        if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+          throw new Error('CyberOps gateway state contains an invalid route port')
+        }
         const route = {
           sessionId: storedSession.id,
           token: storedRoute.token,
           origin,
           source: storedRoute.source,
           attested: storedRoute.attested,
+          port,
+          server: undefined,
         }
         session.byOrigin.set(origin, route)
         routes.set(route.token, route)
@@ -451,15 +508,13 @@ export class CyberOpsGateway {
     }
 
     this.secret = secret
-    this.persistedPort = state.port
     this.sessions = sessions
     this.routes = routes
   }
 
   async #saveState() {
     const state = {
-      version: 1,
-      port: this.persistedPort,
+      version: 2,
       secret: Buffer.from(this.secret).toString('base64url'),
       sessions: [...this.sessions].map(([id, session]) => ({
         id,
@@ -470,6 +525,7 @@ export class CyberOpsGateway {
           origin: route.origin,
           source: route.source,
           attested: route.attested,
+          ...(route.port === undefined ? {} : { port: route.port }),
         })),
       })),
     }
@@ -481,7 +537,7 @@ export class CyberOpsGateway {
     await chmod(this.statePath, 0o600)
   }
 
-  projectPrompt(sessionId, text) {
+  async projectPrompt(sessionId, text) {
     if (typeof text !== 'string' || text.trim() === '') return { text, changed: false }
     if (/\/cyberoff\b/iu.test(text)) {
       this.dropSession(sessionId)
@@ -498,7 +554,7 @@ export class CyberOpsGateway {
       // session for the rest of that chat.
       if (intent !== 'explicit' && this.sessions.get(String(sessionId))?.active !== true) continue
       try {
-        this.register(sessionId, candidate, intent)
+        await this.register(sessionId, candidate, intent)
         if (intent === 'explicit') {
           const before = text.slice(0, match.index).split(/[;\n\r.!?]/u).at(-1) ?? ''
           this.sessions.get(String(sessionId)).directAccess = /\/cyber-2\b/iu.test(before)
@@ -516,7 +572,7 @@ export class CyberOpsGateway {
       this.sessions.get(String(sessionId))?.active === true
     ) {
       try {
-        this.register(sessionId, standalone.candidate, 'referenced')
+        await this.register(sessionId, standalone.candidate, 'referenced')
       } catch {
         // Keep unrouteable standalone text unchanged.
       }
@@ -554,7 +610,7 @@ export class CyberOpsGateway {
 
   aliasFor(route, target) {
     const pathname = target.pathname || '/'
-    return `${this.origin}${ROUTE_PREFIX}${route.token}${pathname}${target.search}`
+    return `${aliasOrigin(route)}${ROUTE_PREFIX}${route.token}${pathname}${target.search}`
   }
 
   context(sessionId) {
@@ -580,6 +636,7 @@ export class CyberOpsGateway {
       lines.push(`- ${this.aliasFor(route, new URL(`${route.origin}/`))} [${label}]`)
     }
     lines.push(
+      'Every route below has its own loopback port. Use exactly the base shown for that route; never splice one route’s path onto another route’s base, and never assume two routes share a port.',
       'For Bash path discovery, copy the displayed masked base byte-for-byte (including its scheme, `127.0.0.1`, port, and `/_cyberops/<opaque-token>/`) into one base variable, then append endpoint paths to that base. Never retype, normalize, shorten, or reconstruct the base. Never probe the gateway origin, `/_cyberops/`, or gateway-level `/api` and `/health` paths.',
       'The corrupted-route stop rule applies only when CyberOps explicitly says “blocked a corrupted masked task URL”; it does not apply to an exact masked route that returns an `x-cyberops-error` upstream diagnosis.',
       'Treat HTTP 502 with an `x-cyberops-error: upstream-*` header as temporary upstream availability, not as a CyberOps authorization denial. Retry the exact masked URL with bounded backoff. When target recovery is necessary for the requested work, a bounded, spaced background check is allowed. Keep the full masked route unchanged and continue other useful work between checks. A temporary 502 alone does not require ending the task or marking a goal blocked.',
@@ -594,7 +651,7 @@ export class CyberOpsGateway {
     const serialized = JSON.stringify(args)
     if (!serialized) return false
     return [...session.byOrigin.values()].some((route) => (
-      serialized.includes(`${this.origin}${ROUTE_PREFIX}${route.token}`)
+      route.port && serialized.includes(routeBase(route))
     ))
   }
 
@@ -606,9 +663,10 @@ export class CyberOpsGateway {
     if (!serialized) return undefined
 
     for (const route of session.byOrigin.values()) {
+      if (!route.port) continue
       const routePath = `${ROUTE_PREFIX}${route.token}`
       const includesKnownToken = serialized.includes(routePath)
-      const includesExactRoute = serialized.includes(`${this.origin}${routePath}`)
+      const includesExactRoute = serialized.includes(routeBase(route))
       if (includesKnownToken && !includesExactRoute) {
         const exactBase = this.aliasFor(route, new URL(`${route.origin}/`))
         return `${CORRUPTED_ROUTE_REASON_PREFIX} Exact authorized base: ${exactBase} Do not automatically retry. Re-read the user’s requested scope and stop conditions. Only if their instruction still requires this request, copy the base byte-for-byte at most once; never retype or alter its scheme, host, port, route prefix, or token. Otherwise report this blocker and stop.`
@@ -622,15 +680,16 @@ export class CyberOpsGateway {
       }
     }
 
+    const aliasOrigins = new Set([...session.byOrigin.values()].filter((route) => route.port).map((route) => aliasOrigin(route)))
     const URLs = [...serialized.matchAll(ABSOLUTE_URL)].map((match) => trimCandidate(match[0]).candidate)
     for (const rawURL of URLs) {
       try {
         const candidate = new URL(rawURL)
-        if (candidate.origin === this.origin && !candidate.pathname.startsWith(ROUTE_PREFIX)) {
+        if (aliasOrigins.has(candidate.origin) && !candidate.pathname.startsWith(ROUTE_PREFIX)) {
           if (/^(?:bash|web_fetch|browser|fetch|http)/iu.test(toolName)) {
             return 'CyberOps blocked a gateway URL that dropped the task token. Keep the full masked route through `/_cyberops/<opaque-token>/` as the command base and append only endpoint paths to that base; never probe the gateway origin or meta routes.'
           }
-        } else if (candidate.origin !== this.origin) {
+        } else if (!aliasOrigins.has(candidate.origin)) {
           if (/^(?:bash|web_fetch|browser|fetch|http)/iu.test(toolName)) {
             return 'CyberOps blocked network access outside this task’s masked URL routes.'
           }
@@ -643,7 +702,7 @@ export class CyberOpsGateway {
     if (toolName === 'bash') {
       const command = typeof args?.command === 'string' ? args.command : serialized
       if (NETWORK_COMMAND.test(command) || NETWORK_INTERPRETER.test(command)) {
-        const hasTaskRoute = command.includes(`${this.origin}${ROUTE_PREFIX}`)
+        const hasTaskRoute = [...session.byOrigin.values()].some((route) => route.port && command.includes(routeBase(route)))
         if (!hasTaskRoute) {
           return 'CyberOps blocked a network command outside the masked target route. Use only the task-local URL.'
         }
@@ -652,15 +711,19 @@ export class CyberOpsGateway {
     return undefined
   }
 
-  async #serve(request, response) {
+  async #serve(route, request, response) {
     try {
-      const incoming = new URL(request.url, this.origin)
+      // The listener is dedicated to this route, so a retired route or a token
+      // from another URL must not be served here.
+      if (this.routes.get(route.token) !== route || !route.port) {
+        return this.#error(response, 404, 'unknown or expired CyberOps task URL')
+      }
+      const incoming = new URL(request.url, aliasOrigin(route))
       if (!incoming.pathname.startsWith(ROUTE_PREFIX)) return this.#error(response, 404, 'unknown CyberOps task URL')
       const remainder = incoming.pathname.slice(ROUTE_PREFIX.length)
       const slash = remainder.indexOf('/')
       const token = slash === -1 ? remainder : remainder.slice(0, slash)
-      const route = this.routes.get(token)
-      if (!route) return this.#error(response, 404, 'unknown or expired CyberOps task URL')
+      if (token !== route.token) return this.#error(response, 404, 'unknown or expired CyberOps task URL')
       if (BLOCKING_ENABLED && !route.attested && !SAFE_ROUTINE_METHODS.has(request.method ?? 'GET')) {
         return this.#error(response, 403, 'route is routine navigation only')
       }
@@ -668,19 +731,19 @@ export class CyberOpsGateway {
       const suffix = slash === -1 ? '/' : remainder.slice(slash)
       const target = new URL(`${suffix}${incoming.search}`, route.origin)
       const headers = safeHeaders(request.headers)
-      if (typeof headers.origin === 'string' && headers.origin === this.origin) headers.origin = route.origin
+      if (typeof headers.origin === 'string' && headers.origin === aliasOrigin(route)) headers.origin = route.origin
       if (typeof headers.referer === 'string') headers.referer = this.#resolveAlias(route, headers.referer) ?? headers.referer
       headers.host = target.host
 
       const client = target.protocol === 'https:' ? https : http
       const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent
-      const upstream = client.request(target, { method: request.method, headers, agent }, (upstreamResponse) => {
+      const upstream = client.request(target, { method: request.method, headers, agent }, async (upstreamResponse) => {
         const responseHeaders = safeHeaders(upstreamResponse.headers)
         const location = upstreamResponse.headers.location
         if (location) {
           try {
             const destination = new URL(location, target)
-            responseHeaders.location = this.register(route.sessionId, destination.href, 'discovered')
+            responseHeaders.location = await this.register(route.sessionId, destination.href, 'discovered')
           } catch {
             delete responseHeaders.location
           }
@@ -712,7 +775,7 @@ export class CyberOpsGateway {
     try {
       const value = new URL(raw)
       const prefix = `${ROUTE_PREFIX}${route.token}`
-      if (value.origin !== this.origin || !value.pathname.startsWith(prefix)) return undefined
+      if (value.origin !== aliasOrigin(route) || !value.pathname.startsWith(prefix)) return undefined
       return new URL(`${value.pathname.slice(prefix.length) || '/'}${value.search}`, route.origin).href
     } catch {
       return undefined

@@ -220,18 +220,25 @@ export function cyberOpsPrompt(toolkit, directAccess = false) {
   ].join('\n')
 }
 
-export function projectMessage(gateway, sessionId, message) {
+export async function projectMessage(gateway, sessionId, message) {
   let changed = false
   const userAuthored = message.source?.kind === 'user'
-  const content = message.content.map((block) => {
-    if (block.type !== 'text') return block
+  const content = []
+  for (const block of message.content) {
+    if (block.type !== 'text') {
+      content.push(block)
+      continue
+    }
     const projected = userAuthored
-      ? gateway.projectPrompt(sessionId, block.text).text
+      ? (await gateway.projectPrompt(sessionId, block.text)).text
       : gateway.providerText(sessionId, block.text)
-    if (projected === block.text) return block
+    if (projected === block.text) {
+      content.push(block)
+      continue
+    }
     changed = true
-    return { ...block, text: projected }
-  })
+    content.push({ ...block, text: projected })
+  }
   return changed ? freeze({ ...message, content }) : message
 }
 
@@ -397,7 +404,9 @@ export async function apply(ctx, config = {}) {
     if (decision.kind === 'reject') return decision
 
     const before = gateway.context(agent.id)
-    const messages = decision.messages.map((message) => projectMessage(gateway, agent.id, message))
+    const messages = await Promise.all(
+      decision.messages.map((message) => projectMessage(gateway, agent.id, message)),
+    )
     await gateway.flush()
     const after = gateway.context(agent.id)
     const contextChanged = after !== before
@@ -501,10 +510,9 @@ export async function apply(ctx, config = {}) {
   })
 
   ctx.logger?.('cyberops').info(
-    'verified CyberOps toolkit %s with %d tools; masked gateway %s; state %s',
+    'verified CyberOps toolkit %s with %d tools; one masked listener per route; state %s',
     toolkit.bundleVersion,
     toolkit.tools.length,
-    gateway.origin,
     statePath,
   )
 }

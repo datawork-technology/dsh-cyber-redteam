@@ -200,9 +200,9 @@ test('masks an explicitly authorized URL without exposing its origin', async (t)
   t.after(() => gateway.close())
 
   const original = 'Please test /cyber https://example.com/admin?q=1.'
-  const projected = gateway.projectPrompt('session-a', original).text
+  const projected = (await gateway.projectPrompt('session-a', original)).text
   assert.doesNotMatch(projected, /example\.com/u)
-  assert.match(projected, new RegExp(`^Please test /cyber ${gateway.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/_cyberops/`))
+  assert.match(projected, /^Please test \/cyber http:\/\/127\.0\.0\.1:\d+\/_cyberops\//u)
   assert.match(gateway.context('session-a'), /authorized target/u)
   assert.doesNotMatch(gateway.context('session-a'), /example\.com/u)
 })
@@ -212,7 +212,7 @@ test('does not activate CyberOps for referenced URLs', async (t) => {
   await gateway.start()
   t.after(() => gateway.close())
 
-  gateway.projectPrompt('session-b', 'Audit https://example.com; use https://docs.example.net only as a reference.')
+  await gateway.projectPrompt('session-b', 'Audit https://example.com; use https://docs.example.net only as a reference.')
   assert.equal(gateway.context('session-b'), '')
 })
 
@@ -229,7 +229,7 @@ test('projects user messages before they enter the model step', async (t) => {
     content: Object.freeze([{ type: 'text', text: 'https://example.com/private' }]),
   })
 
-  const projected = projectMessage(gateway, 'session-c', message)
+  const projected = await projectMessage(gateway, 'session-c', message)
   assert.equal(projected.id, message.id)
   assert.notEqual(projected, message)
   assert.doesNotMatch(projected.content[0].text, /example\.com/u)
@@ -240,7 +240,7 @@ test('guard stays non-blocking when blocking policy is disabled', async (t) => {
   const gateway = new CyberOpsGateway()
   await gateway.start()
   t.after(() => gateway.close())
-  gateway.projectPrompt('session-d', '/cyber https://example.com')
+  await gateway.projectPrompt('session-d', '/cyber https://example.com')
 
   assert.equal(
     gateway.guardReason('session-d', 'bash', { command: 'curl https://example.com' }),
@@ -287,17 +287,18 @@ test('local gateway forwards authorized requests and masks redirects', async (t)
   await gateway.start()
   t.after(() => gateway.close())
   const upstreamPort = upstream.address().port
-  const alias = gateway.projectPrompt(
+  const alias = (await gateway.projectPrompt(
     'session-e',
     `/cyber http://127.0.0.1:${upstreamPort}/redirect`,
-  ).text.replace('/cyber ', '')
+  )).text.replace('/cyber ', '')
 
   const redirected = await fetch(alias, { redirect: 'manual' })
   assert.equal(redirected.status, 302)
-  assert.match(redirected.headers.get('location'), new RegExp(`^${gateway.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/_cyberops/`))
+  const aliasOrigin = new URL(alias).origin
+  assert.match(redirected.headers.get('location'), new RegExp(`^${aliasOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/_cyberops/`))
   assert.doesNotMatch(redirected.headers.get('location'), new RegExp(String(upstreamPort)))
 
-  const destination = new URL(redirected.headers.get('location'), gateway.origin)
+  const destination = new URL(redirected.headers.get('location'), aliasOrigin)
   const result = await fetch(destination)
   assert.equal(await result.text(), 'upstream:GET:/next')
 })
@@ -314,10 +315,10 @@ test('local gateway supports hostname lookup when Node requests all addresses', 
   await gateway.start()
   t.after(() => gateway.close())
   const upstreamPort = upstream.address().port
-  const alias = gateway.projectPrompt(
+  const alias = (await gateway.projectPrompt(
     'hostname-session',
     `/cyber http://localhost:${upstreamPort}/health`,
-  ).text.replace('/cyber ', '')
+  )).text.replace('/cyber ', '')
 
   const response = await fetch(alias)
   assert.equal(response.status, 200)
@@ -339,10 +340,10 @@ test('an authorized masked route survives a gateway restart', async (t) => {
   const upstreamPort = upstream.address().port
   const first = new CyberOpsGateway({ allowPrivateTargets: true, statePath })
   await first.start()
-  const alias = first.projectPrompt(
+  const alias = (await first.projectPrompt(
     'persistent-session',
     `/cyber http://127.0.0.1:${upstreamPort}/health`,
-  ).text.replace('/cyber ', '')
+  )).text.replace('/cyber ', '')
   assert.equal(await (await fetch(alias)).text(), 'persistent-target-ok')
   await first.close()
 
@@ -350,37 +351,38 @@ test('an authorized masked route survives a gateway restart', async (t) => {
   await second.start()
   t.after(() => second.close())
 
-  assert.equal(second.origin, new URL(alias).origin)
   assert.equal(await (await fetch(alias)).text(), 'persistent-target-ok')
   assert.match(second.context('persistent-session'), /authorized target/u)
 })
 
-test('a taken persisted port falls back to an ephemeral one instead of failing boot', async (t) => {
+test('a taken route port falls back to an ephemeral one instead of failing boot', async (t) => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'dsh-cyberops-port-'))
   const statePath = path.join(stateRoot, 'gateway.json')
   t.after(() => rm(stateRoot, { recursive: true, force: true }))
 
-  // Another process owns the port this gateway recorded on its previous boot.
-  const squatter = http.createServer()
-  await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve))
-  const takenPort = squatter.address().port
-  t.after(() => new Promise((resolve) => squatter.close(resolve)))
+  const first = new CyberOpsGateway({ allowPrivateTargets: true, statePath })
+  await first.start()
+  const alias = (await first.projectPrompt('port-session', '/cyber https://example.com/x')).text
+    .replace('/cyber ', '')
+  const takenPort = Number(new URL(alias).port)
+  await first.close()
 
-  await writeFile(statePath, JSON.stringify({
-    version: 1,
-    port: takenPort,
-    secret: IDENTITY_KEY,
-    sessions: [],
-  }))
+  // Another process owns the port this route recorded on its previous boot.
+  const squatter = http.createServer()
+  await new Promise((resolve) => squatter.listen(takenPort, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => squatter.close(resolve)))
 
   const gateway = new CyberOpsGateway({ allowPrivateTargets: true, statePath })
   await gateway.start()
   t.after(() => gateway.close())
 
-  assert.notEqual(new URL(gateway.origin).port, String(takenPort))
+  const routes = [...gateway.routes.values()]
+  assert.equal(routes.length, 1)
+  assert.notEqual(routes[0].port, takenPort)
   // The replacement port is persisted, so the next boot is stable again.
   const persisted = JSON.parse(await readFile(statePath, 'utf8'))
-  assert.equal(persisted.port, Number(new URL(gateway.origin).port))
+  assert.equal(persisted.version, 2)
+  assert.equal(persisted.sessions[0].routes[0].port, routes[0].port)
 })
 
 test('a non-EADDRINUSE listen failure still surfaces', async (t) => {
@@ -391,10 +393,20 @@ test('a non-EADDRINUSE listen failure still surfaces', async (t) => {
   // Port 1 is privileged: binding it as an unprivileged user is EACCES, not a
   // stale-port collision, so the failure must not be swallowed.
   await writeFile(statePath, JSON.stringify({
-    version: 1,
-    port: 1,
+    version: 2,
     secret: IDENTITY_KEY,
-    sessions: [],
+    sessions: [{
+      id: 'bind-chat',
+      active: true,
+      directAccess: false,
+      routes: [{
+        token: 'b'.repeat(24),
+        origin: 'https://example.com',
+        source: 'explicit',
+        attested: true,
+        port: 1,
+      }],
+    }],
   }))
 
   const gateway = new CyberOpsGateway({ allowPrivateTargets: true, statePath })
@@ -414,10 +426,10 @@ test('an unavailable destination returns an actionable masked diagnosis', async 
   const gateway = new CyberOpsGateway({ allowPrivateTargets: true })
   await gateway.start()
   t.after(() => gateway.close())
-  const alias = gateway.projectPrompt(
+  const alias = (await gateway.projectPrompt(
     'unavailable-session',
     `/cyber http://127.0.0.1:${unavailablePort}/health`,
-  ).text.replace('/cyber ', '')
+  )).text.replace('/cyber ', '')
 
   const response = await fetch(alias)
   const body = await response.text()
@@ -440,7 +452,7 @@ test('cyber2 retains masking, persists direct mode, switches back and revokes ro
   let gateway = new CyberOpsGateway({ statePath })
   t.after(async () => { await gateway.close(); await rm(root, { recursive: true, force: true }) })
   await gateway.start()
-  const masked = gateway.projectPrompt('cyber2-session', '/cyber-2 https://example.com/proof').text
+  const masked = (await gateway.projectPrompt('cyber2-session', '/cyber-2 https://example.com/proof')).text
   assert.doesNotMatch(masked, /example\.com/)
   assert.match(masked, /\/_cyberops\//)
   assert.equal(gateway.sessionState('cyber2-session').directAccess, true)
@@ -453,18 +465,31 @@ test('cyber2 retains masking, persists direct mode, switches back and revokes ro
   await gateway.start()
   assert.equal(gateway.sessionState('cyber2-session').directAccess, true)
   assert.equal(gateway.providerText('cyber2-session', 'https://example.com/proof'), masked.replace('/cyber-2 ', ''))
-  gateway.projectPrompt('cyber2-session', '/cyber https://example.com')
+  await gateway.projectPrompt('cyber2-session', '/cyber https://example.com')
   assert.equal(gateway.sessionState('cyber2-session').directAccess, false)
   assert.match(gateway.context('cyber2-session'), /Never infer, recover, print/)
-  gateway.projectPrompt('cyber2-session', '/cyber-2 https://example.com')
-  gateway.projectPrompt('cyber2-session', '/cyberoff')
+  await gateway.projectPrompt('cyber2-session', '/cyber-2 https://example.com')
+  await gateway.projectPrompt('cyber2-session', '/cyberoff')
   assert.equal(gateway.context('cyber2-session'), '')
-  assert.equal((await fetch(masked.replace('/cyber-2 ', ''))).status, 404)
+  await assertRouteIsDead(masked.replace('/cyber-2 ', ''), 'revoked token must stop resolving')
 })
 
 /** The opaque token segment of a masked task URL. */
 function tokenOf(alias) {
   return new URL(alias).pathname.split('/')[2]
+}
+
+/**
+ * A revoked route retires its listener, so the masked URL either 404s (if the
+ * port is still held by something that answers) or refuses the connection.
+ */
+async function assertRouteIsDead(alias, message) {
+  try {
+    const response = await fetch(alias)
+    assert.equal(response.status, 404, message)
+  } catch (error) {
+    assert.equal(error.cause?.code, 'ECONNREFUSED', message)
+  }
 }
 
 test('every chat mints its own masked route for the same origin', async (t) => {
@@ -475,7 +500,7 @@ test('every chat mints its own masked route for the same origin', async (t) => {
   const sessions = ['chat-a', 'chat-b', 'chat-c', 'chat-d']
   const tokens = new Map()
   for (const session of sessions) {
-    const projected = gateway.projectPrompt(session, '/cyber-2 https://example.com/app').text
+    const projected = (await gateway.projectPrompt(session, '/cyber-2 https://example.com/app')).text
     const token = tokenOf(projected.replace('/cyber-2 ', ''))
     assert.match(token, /^[A-Za-z0-9_-]{24}$/u)
     tokens.set(session, token)
@@ -505,17 +530,17 @@ test('a re-activation mints a new token instead of resurrecting the revoked one'
   await gateway.start()
   t.after(() => gateway.close())
 
-  const first = gateway.projectPrompt('revoke-chat', `/cyber-2 http://127.0.0.1:${port}/one`).text
+  const first = (await gateway.projectPrompt('revoke-chat', `/cyber-2 http://127.0.0.1:${port}/one`)).text
     .replace('/cyber-2 ', '')
   assert.equal(await (await fetch(first)).text(), 'revoke-target-ok')
 
-  gateway.projectPrompt('revoke-chat', '/cyberoff')
-  assert.equal((await fetch(first)).status, 404, 'revoked token must stop resolving')
+  await gateway.projectPrompt('revoke-chat', '/cyberoff')
+  await assertRouteIsDead(first, 'revoked token must stop resolving')
 
-  const second = gateway.projectPrompt('revoke-chat', `/cyber-2 http://127.0.0.1:${port}/one`).text
+  const second = (await gateway.projectPrompt('revoke-chat', `/cyber-2 http://127.0.0.1:${port}/one`)).text
     .replace('/cyber-2 ', '')
   assert.notEqual(tokenOf(first), tokenOf(second), 'a new activation must mint a new token')
-  assert.equal((await fetch(first)).status, 404, 'the old token must stay dead')
+  await assertRouteIsDead(first, 'the old token must stay dead')
   assert.equal(await (await fetch(second)).text(), 'revoke-target-ok')
 })
 
@@ -525,8 +550,8 @@ test('re-projecting one activation keeps the same masked route', async (t) => {
   t.after(() => gateway.close())
 
   const prompt = 'Please test /cyber https://example.com/admin.'
-  const once = gateway.projectPrompt('stable-chat', prompt).text
-  const twice = gateway.projectPrompt('stable-chat', prompt).text
+  const once = (await gateway.projectPrompt('stable-chat', prompt)).text
+  const twice = (await gateway.projectPrompt('stable-chat', prompt)).text
   assert.equal(once, twice, 'agent/pre-step re-projects history, so a route must be stable within one activation')
 })
 
@@ -536,7 +561,7 @@ test('a new chat after a restart still gets a token of its own', async (t) => {
 
   const first = new CyberOpsGateway({ statePath })
   await first.start()
-  const before = first.projectPrompt('persisted-chat', '/cyber-2 https://example.com/x').text
+  const before = (await first.projectPrompt('persisted-chat', '/cyber-2 https://example.com/x')).text
     .replace('/cyber-2 ', '')
   await first.close()
 
@@ -551,7 +576,7 @@ test('a new chat after a restart still gets a token of its own', async (t) => {
   // The active chat keeps its route across the restart...
   assert.equal(second.providerText('persisted-chat', 'https://example.com/x'), before)
   // ...while a different chat never inherits that token.
-  const other = second.projectPrompt('fresh-chat', '/cyber-2 https://example.com/x').text
+  const other = (await second.projectPrompt('fresh-chat', '/cyber-2 https://example.com/x')).text
     .replace('/cyber-2 ', '')
   assert.notEqual(tokenOf(other), tokenOf(before))
 })
@@ -562,14 +587,14 @@ test('a pasted URL stays untouched while Red Team is off', async (t) => {
   t.after(() => gateway.close())
 
   const text = 'Semak https://example.com/a?b=1 dan https://docs.example.net/x'
-  const projected = gateway.projectPrompt('idle-chat', text)
+  const projected = await gateway.projectPrompt('idle-chat', text)
   assert.equal(projected.text, text, 'off-mode must not rewrite the URL')
   assert.equal(projected.changed, false)
   assert.equal(gateway.sessionState('idle-chat'), undefined)
   assert.equal(gateway.context('idle-chat'), '')
 
   // A bare domain is left alone too.
-  assert.equal(gateway.projectPrompt('idle-chat', 'example.com').text, 'example.com')
+  assert.equal((await gateway.projectPrompt('idle-chat', 'example.com')).text, 'example.com')
 })
 
 test('arming masks later pastes and disarming restores them', async (t) => {
@@ -578,13 +603,13 @@ test('arming masks later pastes and disarming restores them', async (t) => {
   t.after(() => gateway.close())
 
   gateway.setArmed('toggle-chat', true)
-  const masked = gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a').text
+  const masked = (await gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a')).text
   assert.doesNotMatch(masked, /example\.com/u)
   assert.match(masked, /\/_cyberops\//u)
 
   gateway.setArmed('toggle-chat', false)
   assert.equal(
-    gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a').text,
+    (await gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a')).text,
     'Semak https://example.com/a',
     'disarming must stop masking immediately',
   )
@@ -595,8 +620,8 @@ test('/cyber arms the chat for later referenced URLs', async (t) => {
   await gateway.start()
   t.after(() => gateway.close())
 
-  gateway.projectPrompt('cmd-chat', '/cyber https://example.com/one')
-  const later = gateway.projectPrompt('cmd-chat', 'rujuk https://docs.example.net/x').text
+  await gateway.projectPrompt('cmd-chat', '/cyber https://example.com/one')
+  const later = (await gateway.projectPrompt('cmd-chat', 'rujuk https://docs.example.net/x')).text
   assert.doesNotMatch(later, /docs\.example\.net/u)
   assert.match(later, /\/_cyberops\//u)
 })
@@ -633,4 +658,44 @@ test('a reload drops routes left behind by a disarmed session', async (t) => {
   assert.equal(gateway.sessionState('legacy-chat'), undefined)
   assert.equal(gateway.providerText('legacy-chat', staleAlias), staleAlias)
   assert.equal(gateway.context('legacy-chat'), '')
+})
+
+test('each masked route listens on its own port', async (t) => {
+  const gateway = new CyberOpsGateway()
+  await gateway.start()
+  t.after(() => gateway.close())
+
+  const aliasOf = async (session, text) => (await gateway.projectPrompt(session, text)).text.replace('/cyber-2 ', '')
+  const chatA = await aliasOf('port-chat-a', '/cyber-2 https://example.com/x')
+  const chatB = await aliasOf('port-chat-b', '/cyber-2 https://example.com/x')
+  const chatA2 = await aliasOf('port-chat-a', '/cyber-2 https://api.example.net/y')
+
+  const port = (alias) => Number(new URL(alias).port)
+  assert.notEqual(port(chatA), port(chatB), 'two chats must not share a port')
+  assert.notEqual(port(chatA), port(chatA2), 'two routes must not share a port')
+  assert.equal(port(chatA), gateway.sessionState('port-chat-a').byOrigin.get('https://example.com').port)
+
+  // A token from another route must not resolve on this port.
+  const cross = `http://127.0.0.1:${port(chatA)}/_cyberops/${tokenOf(chatB)}/x`
+  assert.equal((await fetch(cross)).status, 404)
+})
+
+test('a route keeps its own port across a restart', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-cyberops-ports-'))
+  const statePath = path.join(root, 'gateway.json')
+  const first = new CyberOpsGateway({ statePath })
+  await first.start()
+  const alias = (await first.projectPrompt('port-restart', '/cyber-2 https://example.com/x')).text
+    .replace('/cyber-2 ', '')
+  await first.close()
+
+  const second = new CyberOpsGateway({ statePath })
+  await second.start()
+  t.after(async () => {
+    await second.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  assert.equal(new URL(alias).port, String(second.sessionState('port-restart').byOrigin.get('https://example.com').port))
+  assert.equal(second.providerText('port-restart', 'https://example.com/x'), alias)
 })

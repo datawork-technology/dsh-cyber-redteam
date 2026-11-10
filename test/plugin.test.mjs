@@ -220,6 +220,8 @@ test('projects user messages before they enter the model step', async (t) => {
   const gateway = new CyberOpsGateway()
   await gateway.start()
   t.after(() => gateway.close())
+  // Masking is armed-state driven, so arm this chat before projecting a bare URL.
+  gateway.setArmed('session-c', true)
   const message = Object.freeze({
     id: 'message-1',
     role: 'user',
@@ -552,4 +554,83 @@ test('a new chat after a restart still gets a token of its own', async (t) => {
   const other = second.projectPrompt('fresh-chat', '/cyber-2 https://example.com/x').text
     .replace('/cyber-2 ', '')
   assert.notEqual(tokenOf(other), tokenOf(before))
+})
+
+test('a pasted URL stays untouched while Red Team is off', async (t) => {
+  const gateway = new CyberOpsGateway()
+  await gateway.start()
+  t.after(() => gateway.close())
+
+  const text = 'Semak https://example.com/a?b=1 dan https://docs.example.net/x'
+  const projected = gateway.projectPrompt('idle-chat', text)
+  assert.equal(projected.text, text, 'off-mode must not rewrite the URL')
+  assert.equal(projected.changed, false)
+  assert.equal(gateway.sessionState('idle-chat'), undefined)
+  assert.equal(gateway.context('idle-chat'), '')
+
+  // A bare domain is left alone too.
+  assert.equal(gateway.projectPrompt('idle-chat', 'example.com').text, 'example.com')
+})
+
+test('arming masks later pastes and disarming restores them', async (t) => {
+  const gateway = new CyberOpsGateway()
+  await gateway.start()
+  t.after(() => gateway.close())
+
+  gateway.setArmed('toggle-chat', true)
+  const masked = gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a').text
+  assert.doesNotMatch(masked, /example\.com/u)
+  assert.match(masked, /\/_cyberops\//u)
+
+  gateway.setArmed('toggle-chat', false)
+  assert.equal(
+    gateway.projectPrompt('toggle-chat', 'Semak https://example.com/a').text,
+    'Semak https://example.com/a',
+    'disarming must stop masking immediately',
+  )
+})
+
+test('/cyber arms the chat for later referenced URLs', async (t) => {
+  const gateway = new CyberOpsGateway()
+  await gateway.start()
+  t.after(() => gateway.close())
+
+  gateway.projectPrompt('cmd-chat', '/cyber https://example.com/one')
+  const later = gateway.projectPrompt('cmd-chat', 'rujuk https://docs.example.net/x').text
+  assert.doesNotMatch(later, /docs\.example\.net/u)
+  assert.match(later, /\/_cyberops\//u)
+})
+
+test('a reload drops routes left behind by a disarmed session', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-cyberops-migrate-'))
+  const statePath = path.join(root, 'gateway.json')
+  const staleToken = 'a'.repeat(24)
+  const staleAlias = 'http://127.0.0.1:1/_cyberops/' + staleToken + '/x'
+  // Reserve a free port so the migrated gateway can bind its persisted one.
+  const reservation = http.createServer()
+  await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve))
+  const freePort = reservation.address().port
+  await new Promise((resolve) => reservation.close(resolve))
+  await writeFile(statePath, JSON.stringify({
+    version: 1,
+    port: freePort,
+    secret: IDENTITY_KEY,
+    sessions: [{
+      id: 'legacy-chat',
+      active: false,
+      directAccess: false,
+      routes: [{ token: staleToken, origin: 'https://example.com', source: 'referenced', attested: false }],
+    }],
+  }))
+
+  const gateway = new CyberOpsGateway({ statePath })
+  t.after(async () => {
+    await gateway.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  // Load through the real path, then start: the inactive session must be gone.
+  await gateway.start()
+  assert.equal(gateway.sessionState('legacy-chat'), undefined)
+  assert.equal(gateway.providerText('legacy-chat', staleAlias), staleAlias)
+  assert.equal(gateway.context('legacy-chat'), '')
 })

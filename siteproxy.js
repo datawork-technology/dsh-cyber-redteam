@@ -418,6 +418,10 @@ export class CyberOpsGateway {
         typeof storedSession.active !== 'boolean' ||
         !Array.isArray(storedSession.routes)
       ) throw new Error('CyberOps gateway state contains an invalid session')
+      // Migration: older builds registered a route for every pasted URL even
+      // with the mode off. Those routes were never armed, so drop them instead
+      // of resurrecting a masked token the user never asked for.
+      if (storedSession.active !== true) continue
       const session = { active: storedSession.active, directAccess: storedSession.directAccess === true, byOrigin: new Map() }
       for (const storedRoute of storedSession.routes) {
         if (
@@ -487,6 +491,12 @@ export class CyberOpsGateway {
     for (const match of matches) {
       const { candidate } = trimCandidate(match[0])
       const intent = targetIntent(text, match.index, match.index + candidate.length, matches.length)
+      // Referenced URLs are masked only while CyberOps is armed for this
+      // session. A plain paste in a chat that never turned Red Team on must
+      // stay byte-for-byte what the user typed: no route, no rewritten link.
+      // `/cyber`/`/cyber-2` is the explicit way to opt in, and it arms the
+      // session for the rest of that chat.
+      if (intent !== 'explicit' && this.sessions.get(String(sessionId))?.active !== true) continue
       try {
         this.register(sessionId, candidate, intent)
         if (intent === 'explicit') {
@@ -499,7 +509,12 @@ export class CyberOpsGateway {
       }
     }
     const standalone = trimCandidate(text.trim())
-    if (matches.length === 0 && standalone.trailing === '' && BARE_DOMAIN.test(standalone.candidate)) {
+    if (
+      matches.length === 0 &&
+      standalone.trailing === '' &&
+      BARE_DOMAIN.test(standalone.candidate) &&
+      this.sessions.get(String(sessionId))?.active === true
+    ) {
       try {
         this.register(sessionId, standalone.candidate, 'referenced')
       } catch {
@@ -512,7 +527,9 @@ export class CyberOpsGateway {
 
   providerText(sessionId, text) {
     const session = this.sessions.get(String(sessionId))
-    if (!session || typeof text !== 'string' || text.trim() === '') return text
+    // Masking follows the armed state, so a chat that never turned Red Team on
+    // (or turned it off) shows the URL the user actually typed.
+    if (!session?.active || typeof text !== 'string' || text.trim() === '') return text
     return text.replace(PROVIDER_URL, (raw, offset) => {
       if (offset > 0 && text[offset - 1] === '@') return raw
       const { candidate, trailing } = trimCandidate(raw)

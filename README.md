@@ -22,6 +22,9 @@ allowlist.
 
 ## Masking identity
 
+Masking is armed-state driven: a chat that never turned Red Team on keeps every
+URL exactly as typed, and nothing is registered for it.
+
 Every masked route token is minted with a fresh 128-bit nonce mixed into an
 HMAC keyed by the install secret and bound to the owning session and origin:
 
@@ -43,14 +46,26 @@ HMAC keyed by the install secret and bound to the owning session and origin:
 The Web composer renders a **Red Team** chip (seat `conversation.input.right`,
 next to the model selector). It is a session-scoped arming switch:
 
-- **Off** (default) — no CyberOps prompt is injected. Targets named in a message
-  are still registered and masked as before.
+- **Off** (default) — nothing is masked. A pasted URL reaches the model exactly
+  as typed, and no route is registered.
 - **On** — the CyberOps toolkit section (playbook + tool list) is injected into
-  every step for that session, in Cyber-2 direct-access wording.
+  every step for that session, and URLs in that chat are masked.
 
-Arming **authorizes no target**: it changes instructions only. Targets still
-require an explicit `/cyber-2 <URL>` before a masked route exists. This keeps the
-plugin's per-target attestation model intact.
+Arming **authorizes no target**: it changes instruction and masking only.
+Targets still require an explicit `/cyber-2 <URL>` before a masked route is
+attested. This keeps the plugin's per-target attestation model intact.
+
+Masking follows the armed state, not the presence of a URL:
+
+| Chat state | A pasted URL | `/cyber <URL>` |
+| --- | --- | --- |
+| Never armed | left as typed | masked, and the chat arms |
+| Armed via toggle | masked | masked |
+| After `/cyberoff` | left as typed | masked, and the chat arms |
+
+That rule exists because an unarmed chat is an ordinary conversation: rewriting
+its links into `127.0.0.1` routes is surprising and makes the pasted URL
+unusable. Arming is the explicit opt-in.
 
 The toggle is backed by the `/cyber-mode` command, which is also usable by hand:
 

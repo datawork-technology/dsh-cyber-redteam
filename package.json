@@ -10,12 +10,13 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "index.js",
-    "siteproxy.js",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
     "client.js",
     "cordis.patch.yml",
-    "README.md",
-    "LICENSE"
+    "index.js",
+    "siteproxy.js"
   ],
   "keywords": [
     "dsh",

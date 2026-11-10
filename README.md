@@ -1,11 +1,21 @@
 # dsh-cyber-redteam
 
+[![version](https://img.shields.io/badge/version-0.6.0-2f6f4e)](CHANGELOG.md)
+[![license](https://img.shields.io/badge/license-MIT-2f6f4e)](LICENSE)
+
 CyberOps runtime for DeepSeek Harness, with masked `/cyber` and authorized
 direct-access `/cyber-2` modes, plus a composer **Red Team** toggle.
 
-Renamed from `dsh-cyber-2` (v0.5.0). The command surface, `/cyber-2` wording, and
-status contract are unchanged; only the package identity and the harness home
-moved.
+Two properties define it:
+
+- **Masking is opt-in.** A chat that never turned Red Team on keeps every URL
+  exactly as typed. Arming, or an explicit `/cyber`/`/cyber-2`, opts that chat in.
+- **Every masked route has its own origin.** Each route owns a loopback listener
+  on its own port and carries its own opaque token, so no two masked URLs share
+  an address — across chats or within one.
+
+Renamed from `dsh-cyber-2` (v0.5.0). See [CHANGELOG.md](CHANGELOG.md) for the
+per-release detail.
 
 ## Modes
 

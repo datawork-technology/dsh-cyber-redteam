@@ -3,17 +3,24 @@ import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import https from 'node:https'
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   CorruptedRouteCircuit,
   CyberOpsGateway,
+  upstreamDiagnosis,
   apply,
   cyberOpsPrompt,
   projectMessage,
   verifyToolkit,
 } from '../index.js'
+
+/** Self-signed fixture for a TLS server Node cannot verify. */
+const TEST_TLS_KEY = '-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCpaMH7KMIJtDDM\n5W42o59Ph8lP2GD/RKoP6Cd91bPW+nIKFCUb1DH/MU6z+XtuMwzxG8H1nDVaLGR4\njMUsSNjp9QsrkV4DHKTen4gBz3bs3r+tQpklIijhtVCfYk6wNnEG1gYDPsb3sK0S\n7lq9mp1zZE1B/OH7QwlkAPlSnFo/2WPvbLpaCw+j3g40Hz5OkmHHIJFxU/c0dbV8\n1xCaUPJG1cJFlTLazmQRSwbNuTPqDYUv98zvjfplYhjEKWSFCNW9siwCN1dwGc7u\nQOr9tUq4N3y1OtIGs4OWLSPoLr5RdwxmwvMAqDl1QPcwwCMSaeW/9ccvOofOP2T+\nNFsYvCgdAgMBAAECggEAFyGfLwCbMgEBEtEW8e34gD79rWHRqLlC8UYVMljeI/Hx\nZU/n2ztnkj00zl03zc25rChKnRM1s7jRBSbPe2L8/0D+w/Wm3QzptB4bT4f46JHn\noSwxRgE6jMsZlZGyRdxBJZpOmt3VBBgDIc0a5b25Vvqwk9yILKs0GowJfw6rQgFf\nZqKKbPCMzYZ1R49OfGwPUCSj3jVWh3l9MxG9XeyuE5YPxIiW+JxDEVXbz1r7efNB\nJN/KUfW0pZO78TFTcXYyEDTHZkaKCICSdCToyCu9KYCZU6m1mBFD4OukKgL9AzHw\n4YxfhcLX/HdsH28ijc5mi7T+F6WAj+ztRTE9reQ+sQKBgQDeQKorIFjrdtt8jhAn\n28j/X3YgXoy7au3BcgpZ12NxqdnLhY40nIE4XBOIjGQJ35n4w/VOkZ7fhbhRpucg\nkNtaLqMb+MZW5U0dQk2EduHN46dU/QoAgR1FFt+qb0Co1WjgJ0bfYsta8u3EueFI\n6+IStBOUBL8AXK2/4yZUAfp0ZQKBgQDDIfshXuMcjLJiybsXxanEApg0JHAZw2E6\nKLm79qK4fdrIWFAD6pZcDYg/9HCeWWORdAlEqDqG/XZErXNWvbt+JpJ081fnaKNx\nPW1YRwstm4LQeLGiMi8SBUYl/UupFUSDB/aacWjXfcATwfH6Hy34bycbu12kU1vp\nylnUIk1dWQKBgAV2m3hB7E2ld1HBgD4qle9JHnM/P8BfqYaG0iBRPh2OKk9pcgxz\nCG4lPUmvAcqIV5WY44/R3pDqDZTcQHQ5e1rlKJdIbz+1lUax2Yv3DCfuf6+EJNnM\nUrbfEBJ1d6Zu0IwqCwD0wcDzlcqvMw2C1uTUzmJmF3ffz1mXMNsBzXFNAoGAAdxk\nGbhe8BnDZb/IwfxHly/zJaQnUYeUeMqEou9CNAI3QOver3rgPjZ+0yVQoaH2mh+C\nKx5zmG/4XcVNsUkT7asOgIEFmJZd4KmWTl43FBNElxpfj01tN33HYntc6lrikWFV\nD7n/JvbzCv0xgpIjjRf6RoBt7zBAUyVz39sH49kCgYAkjXuYisubl8+t22dU1Tsh\nYtaSn3Vo+UUiX5Q/BzfDgZPdweaB0Dol5S11gUQne9is+cF1zzuEsiyJ5acmAgED\n1uUB1JbvD1fU7x1FSGalPywn8n4fyLsJpUnobhtnnSzuyDGmoq8fh4mB6qTzZPns\nyuXHqEiZB6CRmpGr/rGewA==\n-----END PRIVATE KEY-----\n'
+const TEST_TLS_CERT = '-----BEGIN CERTIFICATE-----\nMIIDHDCCAgSgAwIBAgIUM8wMhB3djzucJxDhirhKxGUGcUIwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MTExMDExMDcxNFoYDzIxMjYx\nMDE3MTEwNzE0WjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwggEiMA0GCSqGSIb3DQEB\nAQUAA4IBDwAwggEKAoIBAQCpaMH7KMIJtDDM5W42o59Ph8lP2GD/RKoP6Cd91bPW\n+nIKFCUb1DH/MU6z+XtuMwzxG8H1nDVaLGR4jMUsSNjp9QsrkV4DHKTen4gBz3bs\n3r+tQpklIijhtVCfYk6wNnEG1gYDPsb3sK0S7lq9mp1zZE1B/OH7QwlkAPlSnFo/\n2WPvbLpaCw+j3g40Hz5OkmHHIJFxU/c0dbV81xCaUPJG1cJFlTLazmQRSwbNuTPq\nDYUv98zvjfplYhjEKWSFCNW9siwCN1dwGc7uQOr9tUq4N3y1OtIGs4OWLSPoLr5R\ndwxmwvMAqDl1QPcwwCMSaeW/9ccvOofOP2T+NFsYvCgdAgMBAAGjZDBiMB0GA1Ud\nDgQWBBQDDoZ2zRucTvM0Hw0tMYJcb67FEzAfBgNVHSMEGDAWgBQDDoZ2zRucTvM0\nHw0tMYJcb67FEzAPBgNVHRMBAf8EBTADAQH/MA8GA1UdEQQIMAaHBH8AAAEwDQYJ\nKoZIhvcNAQELBQADggEBAAtKg36I25VzwvJIhDOM0egu/8RUcYKJxDm8HwQtsuAQ\nzN7a2cx8nFzrmfBDOpHe0dwWGAiiV6av95M5TQOrhJ84ciUhzqKyEotxjkuDhhc5\ncGpXvG+kNbhIxbj4wxxP4SD8dFJYrv7r44ubSSrTOnlnBqZYKlhRl2ELB6pyMj1o\nVKmjAxc5/lFkRokNEZcWk7p4e3m0X+UNt2001YYMlLf9/aVRSD3CYaYovxZ6p4IW\n3U+qMLWSW1VynWmUAbvbwibLDesTdNqI9G2OGvaS8z54wHL7kTLP2PC/naCQ1s6I\nEekw/h+nQg77jS+b+1HXmbOT0xFYR7tOSMGoZQjRbvA=\n-----END CERTIFICATE-----\n'
 
 /** A valid persisted identity key: base64url of exactly 32 bytes. */
 const IDENTITY_KEY = Buffer.alloc(32, 7).toString('base64url')
@@ -698,4 +705,34 @@ test('a route keeps its own port across a restart', async (t) => {
 
   assert.equal(new URL(alias).port, String(second.sessionState('port-restart').byOrigin.get('https://example.com').port))
   assert.equal(second.providerText('port-restart', 'https://example.com/x'), alias)
+})
+
+test('TLS chain failures are diagnosed as TLS, not as a transient outage', () => {
+  const leafSignature = Object.assign(new Error('unable to verify the first certificate'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' })
+  assert.equal(upstreamDiagnosis(leafSignature).code, 'upstream-tls-failed')
+
+  const selfSigned = Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' })
+  assert.equal(upstreamDiagnosis(selfSigned).code, 'upstream-tls-failed')
+
+  const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+  assert.equal(upstreamDiagnosis(refused).code, 'upstream-connect-refused')
+})
+
+test('an untrusted upstream certificate reports upstream-tls-failed', async (t) => {
+  const upstream = https.createServer({ key: TEST_TLS_KEY, cert: TEST_TLS_CERT }, (_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' })
+    response.end('should not be reached')
+  })
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => upstream.close(resolve)))
+
+  const gateway = new CyberOpsGateway({ allowPrivateTargets: true })
+  await gateway.start()
+  t.after(() => gateway.close())
+
+  const alias = (await gateway.projectPrompt('tls-chat', `/cyber-2 https://127.0.0.1:${upstream.address().port}/`)).text
+    .replace('/cyber-2 ', '')
+  const response = await fetch(alias)
+  assert.equal(response.status, 502)
+  assert.equal(response.headers.get('x-cyberops-error'), 'upstream-tls-failed')
 })

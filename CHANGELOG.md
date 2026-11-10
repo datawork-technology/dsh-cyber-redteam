@@ -3,6 +3,25 @@
 All notable changes to `dsh-cyber-redteam`. The command surface stays
 `/cyber`, `/cyber-2`, `/cyberoff`, and `/cyber-mode on|off|status`.
 
+## 0.6.1 — 2026-11-10
+
+Reach upstreams that send an incomplete certificate chain.
+
+- When TLS verification fails because the server skipped its intermediate
+  certificate, the gateway fetches that issuer from the leaf's Authority
+  Information Access extension and retries once with it added to the trusted
+  roots. Verification stays on: the repaired chain must still reach a local
+  root, so this is not `rejectUnauthorized: false`.
+- The repaired connection answers with `x-cyberops-tls-chain:
+  completed-from-aia`, and the CA bundle is cached per host until it fails.
+- Chain failures (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`,
+  `UNABLE_TO_GET_ISSUER_CERT*`, `SELF_SIGNED_CERT_IN_CHAIN`,
+  `DEPTH_ZERO_SELF_SIGNED_CERT`, `CERT_UNTRUSTED`) now diagnose as
+  `upstream-tls-failed` instead of the generic `upstream-unavailable`, so an
+  agent stops treating a misconfigured certificate as a transient outage.
+- Only GET/HEAD are replayed; a request with a body reports the TLS diagnosis
+  instead of resending it.
+
 ## 0.6.0 — 2026-11-10
 
 One masked listener and port per route.

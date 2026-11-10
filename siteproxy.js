@@ -1,10 +1,11 @@
-import { createHmac, randomBytes } from 'node:crypto'
+import { X509Certificate, createHmac, randomBytes } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import https from 'node:https'
 import { BlockList, isIP } from 'node:net'
 import path from 'node:path'
+import tls from 'node:tls'
 
 const ABSOLUTE_URL = /https?:\/\/[^\s<>"'$]+/giu
 const PROVIDER_URL = /https?:\/\/[^\s<>"'$]+|\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::[0-9]{1,5})?(?:\/[^\s<>"'$]*)?/giu
@@ -17,6 +18,17 @@ const ROUTE_PREFIX = '/_cyberops/'
 const BLOCKING_ENABLED = false // true = mask+block; false = everything in scope (no network blocking)
 export const CORRUPTED_ROUTE_REASON_PREFIX = 'CyberOps blocked a corrupted masked task URL.'
 const SAFE_ROUTINE_METHODS = new Set(['GET', 'HEAD'])
+// TLS failures an incomplete server chain causes: the leaf cannot be built up
+// to a trusted root. Completing the chain through the leaf's AIA issuer keeps
+// verification on, unlike disabling it.
+const TRUST_CHAIN_CODES = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'CERT_UNTRUSTED',
+])
 const NETWORK_COMMAND = /(?:^|[\s;&|()])(?:curl|wget|httpx|katana|ffuf|nuclei|nmap|rustscan|dig|dnsx|subfinder|ncat|nc|netcat|testssl\.sh|chisel|proxychains4?|ssh|scp|sftp|telnet)(?=$|\s)/iu
 const NETWORK_INTERPRETER = /(?:^|[\s;&|()])(?:python(?:3(?:\.\d+)?)?|node|php|ruby|perl)(?=$|\s)[\s\S]*(?:https?:\/\/|\bsocket\b|\bconnect\s*\()/iu
 const HOP_BY_HOP_HEADERS = new Set([
@@ -158,6 +170,75 @@ function lookupPublic(allowPrivateTargets) {
   }
 }
 
+/** Fetch a small binary body with a hard deadline. */
+function fetchBinary(rawUrl, limit) {
+  return new Promise((resolve, reject) => {
+    let parsed
+    try {
+      parsed = new URL(rawUrl)
+    } catch {
+      reject(new Error('invalid issuer URL'))
+      return
+    }
+    const client = parsed.protocol === 'https:' ? https : http
+    const request = client.get(parsed, { headers: { accept: 'application/pkix-cert,application/x-x509-ca-cert,*/*' } }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume()
+        reject(new Error(`issuer fetch answered ${response.statusCode}`))
+        return
+      }
+      const chunks = []
+      let size = 0
+      response.on('data', (chunk) => {
+        size += chunk.length
+        if (size > limit) {
+          request.destroy(new Error('issuer certificate is too large'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.on('end', () => resolve(Buffer.concat(chunks)))
+      response.on('error', reject)
+    })
+    request.setTimeout(5000, () => request.destroy(new Error('issuer fetch timed out')))
+    request.on('error', reject)
+  })
+}
+
+/**
+ * Retrieve the issuer certificate a server failed to send, using the leaf's
+ * Authority Information Access extension. The certificate still has to verify
+ * against the local roots, so this repairs a broken chain instead of disabling
+ * verification.
+ */
+async function fetchIssuerCertificate(host, port) {
+  const leaf = await new Promise((resolve, reject) => {
+    const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: false }, () => {
+      const certificate = socket.getPeerCertificate()
+      socket.end()
+      resolve(certificate?.raw)
+    })
+    socket.setTimeout(6000, () => socket.destroy(new Error('TLS handshake timed out')))
+    socket.once('error', reject)
+  })
+  if (!leaf) return undefined
+  const parsed = new X509Certificate(leaf)
+  // `X509Certificate.infoAccess` is the raw extension text, one access method
+  // per line: "CA Issuers - URI:http://...".
+  const uris = [...(parsed.infoAccess ?? '').matchAll(/CA Issuers\s*-\s*URI:(\S+)/giu)].map((match) => match[1])
+  for (const uri of uris) {
+    if (!/^https?:\/\//iu.test(uri)) continue
+    try {
+      const body = await fetchBinary(uri, 65536)
+      const issuer = new X509Certificate(body)
+      return { pem: issuer.toString(), subject: issuer.subject }
+    } catch {
+      // Try the next declared issuer URI.
+    }
+  }
+  return undefined
+}
+
 function errorCodes(error) {
   const codes = new Set()
   const pending = [error]
@@ -171,7 +252,7 @@ function errorCodes(error) {
   return codes
 }
 
-function upstreamDiagnosis(error) {
+export function upstreamDiagnosis(error) {
   const codes = errorCodes(error)
   if (codes.has('ECONNREFUSED')) {
     return {
@@ -191,10 +272,12 @@ function upstreamDiagnosis(error) {
       detail: 'The masked route is valid, but the destination did not respond before timeout.',
     }
   }
-  if ([...codes].some((code) => code.startsWith('ERR_TLS_') || code.startsWith('CERT_'))) {
+  if ([...codes].some((code) => (
+    code.startsWith('ERR_TLS_') || code.startsWith('CERT_') || TRUST_CHAIN_CODES.has(code)
+  ))) {
     return {
       code: 'upstream-tls-failed',
-      detail: 'The masked route is valid, but TLS verification or negotiation failed.',
+      detail: 'The masked route is valid, but TLS verification or negotiation failed. The destination may send an incomplete certificate chain, or its certificate may not be trusted.',
     }
   }
   return {
@@ -210,6 +293,7 @@ export class CyberOpsGateway {
     this.secret = options.secret ?? randomBytes(32)
     this.sessions = new Map()
     this.routes = new Map()
+    this.trustedChains = new Map()
     this.started = false
     this.persistChain = Promise.resolve()
     this.persistError = undefined
@@ -737,38 +821,76 @@ export class CyberOpsGateway {
 
       const client = target.protocol === 'https:' ? https : http
       const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent
-      const upstream = client.request(target, { method: request.method, headers, agent }, async (upstreamResponse) => {
-        const responseHeaders = safeHeaders(upstreamResponse.headers)
-        const location = upstreamResponse.headers.location
-        if (location) {
-          try {
-            const destination = new URL(location, target)
-            responseHeaders.location = await this.register(route.sessionId, destination.href, 'discovered')
-          } catch {
-            delete responseHeaders.location
+      const send = (extraCa, retried) => {
+        const options = { method: request.method, headers }
+        if (extraCa) options.ca = extraCa
+        else options.agent = agent
+        const upstream = client.request(target, options, async (upstreamResponse) => {
+          const responseHeaders = safeHeaders(upstreamResponse.headers)
+          if (retried) responseHeaders['x-cyberops-tls-chain'] = 'completed-from-aia'
+          const location = upstreamResponse.headers.location
+          if (location) {
+            try {
+              const destination = new URL(location, target)
+              responseHeaders.location = await this.register(route.sessionId, destination.href, 'discovered')
+            } catch {
+              delete responseHeaders.location
+            }
           }
-        }
-        const setCookies = upstreamResponse.headers['set-cookie']
-        if (setCookies) {
-          const prefix = `${ROUTE_PREFIX}${route.token}`
-          responseHeaders['set-cookie'] = setCookies.map((cookie) => rewriteSetCookie(cookie, prefix))
-        }
-        response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders)
-        upstreamResponse.pipe(response)
-      })
-      upstream.on('error', (error) => {
-        const diagnosis = upstreamDiagnosis(error)
-        this.#error(
-          response,
-          502,
-          `CyberOps gateway: ${diagnosis.code}. ${diagnosis.detail} This is a transient upstream failure, not a CyberOps authorization block. Retry this exact masked URL with bounded backoff; a bounded, spaced background check is allowed when recovery is needed. Keep the full masked route unchanged when using the gateway; follow the active session policy for authorized direct access. This 502 alone does not require ending the task or marking a goal blocked.`,
-          { 'x-cyberops-error': diagnosis.code },
-        )
-      })
-      request.pipe(upstream)
+          const setCookies = upstreamResponse.headers['set-cookie']
+          if (setCookies) {
+            const prefix = `${ROUTE_PREFIX}${route.token}`
+            responseHeaders['set-cookie'] = setCookies.map((cookie) => rewriteSetCookie(cookie, prefix))
+          }
+          response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders)
+          upstreamResponse.pipe(response)
+        })
+        upstream.on('error', async (error) => {
+          const chainIssue = [...errorCodes(error)].some((code) => TRUST_CHAIN_CODES.has(code))
+          const replayable = request.method === 'GET' || request.method === 'HEAD'
+          if (!retried && chainIssue && replayable && target.protocol === 'https:') {
+            try {
+              const completed = await this.#completeChain(target)
+              if (completed) {
+                send(completed, true)
+                return
+              }
+            } catch {
+              // Fall through to the plain diagnosis.
+            }
+          }
+          if (retried) this.trustedChains.delete(`${target.hostname}:${target.port || 443}`)
+          const diagnosis = upstreamDiagnosis(error)
+          this.#error(
+            response,
+            502,
+            `CyberOps gateway: ${diagnosis.code}. ${diagnosis.detail} This is a transient upstream failure, not a CyberOps authorization block. Retry this exact masked URL with bounded backoff; a bounded, spaced background check is allowed when recovery is needed. Keep the full masked route unchanged when using the gateway; follow the active session policy for authorized direct access. This 502 alone does not require ending the task or marking a goal blocked.`,
+            { 'x-cyberops-error': diagnosis.code },
+          )
+        })
+        if (retried) upstream.end()
+        else request.pipe(upstream)
+      }
+      send(undefined, false)
     } catch {
       this.#error(response, 400, 'invalid CyberOps task request')
     }
+  }
+
+  /**
+   * Build a CA bundle that completes this host's chain from the leaf's AIA
+   * issuer, so TLS verification stays on. Cached per host; dropped again when
+   * the repaired chain still fails.
+   */
+  async #completeChain(target) {
+    const key = `${target.hostname}:${target.port || 443}`
+    const cached = this.trustedChains.get(key)
+    if (cached) return cached
+    const issuer = await fetchIssuerCertificate(target.hostname, Number(target.port || 443))
+    if (!issuer) return undefined
+    const bundle = [...tls.rootCertificates, issuer.pem]
+    this.trustedChains.set(key, bundle)
+    return bundle
   }
 
   #resolveAlias(route, raw) {

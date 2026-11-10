@@ -1,6 +1,6 @@
 # dsh-cyber-redteam
 
-[![version](https://img.shields.io/badge/version-0.6.0-2f6f4e)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.6.1-2f6f4e)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-2f6f4e)](LICENSE)
 
 CyberOps runtime for DeepSeek Harness, with masked `/cyber` and authorized
@@ -65,6 +65,17 @@ HMAC keyed by the install secret and bound to the owning session and origin:
   rotates mid-turn.
 - **Stable across a restart.** The token is persisted in the gateway state, so
   an active chat keeps the exact same masked URL after the harness restarts.
+
+### TLS
+
+Some government and internal sites send only their leaf certificate, so any
+strict client fails with `unable to verify the first certificate`. The gateway
+repairs that: it reads the leaf's Authority Information Access extension,
+fetches the missing issuer, and retries once with that issuer added to the
+trusted roots. Verification stays on — the repaired chain must still terminate
+at a local root — and a repaired response carries
+`x-cyberops-tls-chain: completed-from-aia`. Any remaining TLS failure reports
+`upstream-tls-failed`, not the generic `upstream-unavailable`.
 
 ## Red Team toggle
 

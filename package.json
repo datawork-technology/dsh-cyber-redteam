@@ -1,6 +1,6 @@
 {
   "name": "dsh-cyber-redteam",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "CyberOps runtime for DeepSeek Harness: per-chat, per-activation masked /cyber and authorized direct-access /cyber-2 routes, plus a composer Red Team toggle",
   "type": "module",
   "main": "index.js",

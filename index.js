@@ -517,4 +517,4 @@ export async function apply(ctx, config = {}) {
   )
 }
 
-export { CyberOpsGateway } from './siteproxy.js'
+export { CyberOpsGateway, upstreamDiagnosis } from './siteproxy.js'

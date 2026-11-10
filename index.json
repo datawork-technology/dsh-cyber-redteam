@@ -50,12 +50,12 @@
       },
       "versions": [
         {
-          "version": "0.6.0",
-          "publishTimestamp": 1794306405,
+          "version": "0.6.1",
+          "publishTimestamp": 1794308850,
           "source": {
             "type": "git",
             "url": "https://github.com/datawork-technology/dsh-cyber-redteam",
-            "commit": "b1ee471a7ed73a17f3c8bc3730916c8435ea5ef9"
+            "commit": "6316428e1382532448116e9ee73330a727cf8655"
           },
           "engines": {}
         }

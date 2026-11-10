@@ -1,0 +1,52 @@
+{
+  "name": "dsh-cyber-redteam",
+  "version": "0.5.1",
+  "description": "CyberOps runtime for DeepSeek Harness: per-chat, per-activation masked /cyber and authorized direct-access /cyber-2 routes, plus a composer Red Team toggle",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "siteproxy.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cyberops",
+    "red-team",
+    "security-testing",
+    "url-masking"
+  ],
+  "author": "Datawork Technology",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datawork-technology/dsh-cyber-redteam.git"
+  },
+  "homepage": "https://github.com/datawork-technology/dsh-cyber-redteam#readme",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  }
+}

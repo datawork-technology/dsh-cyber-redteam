@@ -1,0 +1,16 @@
+# Bundle patch: portable defaults only.
+#
+# Every config key here is a public default, so a user can install this bundle
+# as-is. Site-specific values (a toolkit outside $DSH_HOME, private-network
+# targets, a custom state path) belong in that profile's own patch layer:
+#
+#   # ~/.dsh/profiles/<profile>/cordis.patch.yml
+#   - id: cyberops-runtime
+#     config:
+#       toolkitRoot: /Users/you/toolkits/my-home-server-toolkit
+#       allowPrivateTargets: true
+#
+# A later patch replaces `config` wholesale, so repeat every key you need.
+- insert:
+    - id: cyberops-runtime
+      name: dsh-cyber-redteam
